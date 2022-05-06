@@ -240,7 +240,7 @@ public class TestOakGarbageCollection {
                         executorService,
                         "./gc",
                         1, // do not have any idea of what this parameter is and what is supposed to be set
-                        60 * 1000, // these are millis that are subtracted to the current time in order to get a "max modification time"
+                        0, // Setting 0 will result in a log stating "Sweeping blobs with modified time > than the configured max deleted time (1970-01-01 01:00:00.000)"
                         null); // no idea what it is this - but it's allowed to be null
                 garbageCollector.collectGarbage(false);
             } finally {
