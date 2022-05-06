@@ -1,0 +1,246 @@
+package com.example;
+
+import com.lexicalscope.jewel.cli.CliFactory;
+import com.lexicalscope.jewel.cli.Option;
+import org.apache.commons.io.FileUtils;
+import org.apache.jackrabbit.oak.Oak;
+import org.apache.jackrabbit.oak.api.Blob;
+import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.jcr.Jcr;
+import org.apache.jackrabbit.oak.plugins.blob.MarkSweepGarbageCollector;
+import org.apache.jackrabbit.oak.segment.SegmentBlobReferenceRetriever;
+import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
+import org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions;
+import org.apache.jackrabbit.oak.segment.file.FileStore;
+import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
+import org.apache.jackrabbit.oak.spi.blob.FileBlobStore;
+import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
+import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
+import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
+import org.apache.jackrabbit.oak.spi.state.NodeStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.jcr.*;
+import java.io.BufferedOutputStream;
+import java.io.FileOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+import static java.lang.String.format;
+
+interface TestOakGarbageCollectionConfig {
+
+    @Option
+    File getFileStorePath();
+
+    @Option
+    File getBlobStoreStorePath();
+
+    @Option
+    int getTestFileSizeInMegabytes();
+}
+
+public class TestOakGarbageCollection {
+
+    private static final Logger log = LoggerFactory.getLogger(TestOakGarbageCollection.class);
+
+    private static void logFolderSize(File folder) {
+        log.info(format("folder size in bytes|folder|%s|bytes|%d", folder, FileUtils.sizeOfDirectory(folder)));
+    }
+
+    private static File getTemporaryFileThatWillBeDeletedOnExit(String prefix, @SuppressWarnings("SameParameterValue") String suffix) throws IOException {
+        File downloadFile = File.createTempFile(prefix, suffix);
+        downloadFile.deleteOnExit();
+        return downloadFile;
+    }
+
+    private static File createFileWithRandomContent(int fileSizeInBytes) throws IOException {
+        byte[] bytes = new byte[fileSizeInBytes];
+        BufferedOutputStream bufferedOutputStream = null;
+        FileOutputStream fileOutputStream = null;
+
+        File tempFile = getTemporaryFileThatWillBeDeletedOnExit("oak-garbage-collection-test-", ".bin");
+
+        try {
+            Random random = new Random();
+
+            fileOutputStream = new FileOutputStream(tempFile);
+            bufferedOutputStream = new BufferedOutputStream(fileOutputStream);
+
+            random.nextBytes(bytes);
+            bufferedOutputStream.write(bytes);
+
+            bufferedOutputStream.flush();
+            bufferedOutputStream.close();
+            fileOutputStream.flush();
+            fileOutputStream.close();
+
+            return tempFile;
+        } finally {
+            if (bufferedOutputStream != null) {
+                bufferedOutputStream.flush();
+                bufferedOutputStream.close();
+            }
+            if (fileOutputStream != null) {
+                fileOutputStream.flush();
+                fileOutputStream.close();
+            }
+        }
+    }
+
+    private static NodeBuilder getNodeBuilder(Node node, NodeBuilder rootBuilder) throws RepositoryException {
+        NodeBuilder nodeBuilder = rootBuilder;
+        for (String name : PathUtils.elements(node.getPath())) {
+            nodeBuilder = nodeBuilder.getChildNode(name);
+        }
+        return nodeBuilder;
+    }
+
+    private static Session loginAsAdmin(Repository repository) throws RepositoryException {
+        return repository.login(new SimpleCredentials("admin", "admin".toCharArray()));
+    }
+
+    private static void checkThatAssertionsAreEnabled() {
+        try {
+            assert false;
+            throw new RuntimeException("cannot start: please enable assertions by using the JVM option -ea");
+        } catch (AssertionError ignored) {
+
+        }
+    }
+
+    public static void main(String... args) throws Exception {
+        checkThatAssertionsAreEnabled();
+
+        TestOakGarbageCollectionConfig config = CliFactory.parseArguments(TestOakGarbageCollectionConfig.class, args);
+        log.info("start|configs|" + config.toString());
+
+        FileUtils.deleteQuietly(config.getFileStorePath());
+        FileUtils.deleteQuietly(config.getBlobStoreStorePath());
+        FileUtils.forceMkdir(config.getFileStorePath());
+        FileUtils.forceMkdir(config.getBlobStoreStorePath());
+
+        SegmentGCOptions gcOptions = SegmentGCOptions.defaultGCOptions().setEstimationDisabled(true);
+        try (FileBlobStore fileBlobStore = new FileBlobStore(config.getBlobStoreStorePath().getAbsolutePath());
+             FileStore fileStore = FileStoreBuilder.
+                     fileStoreBuilder(config.getFileStorePath()).
+                     withBlobStore(fileBlobStore).
+                     withGCOptions(gcOptions).
+                     build()) {
+            NodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
+            Repository repository = new Jcr(new Oak(nodeStore)).createRepository();
+
+            logFolderSize(config.getFileStorePath());
+            logFolderSize(config.getBlobStoreStorePath());
+
+            File temporaryFile = createFileWithRandomContent(config.getTestFileSizeInMegabytes() * 1024 * 1024);
+            log.info(format("generated test file|file|%s|size in bytes|%d", temporaryFile.getAbsoluteFile(), FileUtils.sizeOf(temporaryFile)));
+
+            String fileNodeId;
+            /*
+            Create a random file of the given size just under the store root node
+             */
+            Session session = loginAsAdmin(repository);
+            try {
+                Node rootFolder = session.getRootNode();
+                Node fileNode = rootFolder.addNode(temporaryFile.getName(), "nt:file");
+                fileNode.addMixin("mix:referenceable");
+                Node fileContentNode = fileNode.addNode("jcr:content", "nt:resource");
+                fileContentNode.setProperty("jcr:data", "");
+                session.save();
+
+                Blob blob = nodeStore.createBlob(FileUtils.openInputStream(temporaryFile));
+                NodeBuilder rootBuilder = nodeStore.getRoot().builder();
+                NodeBuilder fileContentNodeBuilder = getNodeBuilder(fileContentNode, rootBuilder);
+                fileContentNodeBuilder.setProperty("jcr:data", blob);
+                nodeStore.merge(rootBuilder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+                session.save();
+
+                fileNodeId = fileNode.getIdentifier();
+            } finally {
+                session.logout();
+            }
+
+            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) == FileUtils.sizeOf(temporaryFile) : "uploaded file seems to be missing from the blob store";
+
+            logFolderSize(config.getFileStorePath());
+            logFolderSize(config.getBlobStoreStorePath());
+
+            /*
+            Check that the file is actually there and the content is what we expect to be
+             */
+            session = loginAsAdmin(repository);
+            try {
+                Node fileNode = session.getNodeByIdentifier(fileNodeId);
+                Node fileContentNode = fileNode.getNode("jcr:content");
+                Property blobProperty = fileContentNode.getProperty("jcr:data");
+                Binary blobBinary = blobProperty.getBinary();
+                File downloadFile = getTemporaryFileThatWillBeDeletedOnExit("oak-garbage-collection-test-downloaded-", ".bin");
+                FileUtils.copyInputStreamToFile(blobBinary.getStream(), downloadFile);
+                final boolean isDownloadedFileEqualToOriginalFile = Files.mismatch(Paths.get(temporaryFile.getAbsolutePath()), Paths.get(downloadFile.getAbsolutePath())) == -1L;
+                assert isDownloadedFileEqualToOriginalFile : format("downloaded file differs from original file|downloaded|%s|original|%s", downloadFile, temporaryFile);
+            } finally {
+                session.logout();
+            }
+
+            /*
+            Delete the file
+             */
+            session = loginAsAdmin(repository);
+            try {
+                Node fileNode = session.getNodeByIdentifier(fileNodeId);
+                fileNode.remove();
+                session.save();
+            } finally {
+                session.logout();
+            }
+
+            /*
+            Check the file is no more present
+             */
+            session = loginAsAdmin(repository);
+            try {
+                try {
+                    session.getNodeByIdentifier(fileNodeId);
+                    assert false : "file is still present in the repository";
+                } catch (ItemNotFoundException ignored) {}
+            } finally {
+                session.logout();
+            }
+
+            /*
+            We need GC in order to actually remove the files from the File System, so the Blob store should still have the previous size
+             */
+            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) == FileUtils.sizeOf(temporaryFile);
+
+            /*
+            Run the GC: this is the tricky part, parameters _might_ be wrong
+             */
+            ExecutorService executorService = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+            try {
+                MarkSweepGarbageCollector garbageCollector = new MarkSweepGarbageCollector(
+                        new SegmentBlobReferenceRetriever(fileStore),
+                        fileBlobStore,
+                        executorService,
+                        "./gc",
+                        1, // do not have any idea of what this parameter is and what is supposed to be set
+                        60 * 1000, // these are millis that are subtracted to the current time in order to get a "max modification time"
+                        null); // no idea what it is this - but it's allowed to be null
+                garbageCollector.collectGarbage(false);
+            } finally {
+                executorService.shutdown();
+            }
+
+            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) < FileUtils.sizeOf(temporaryFile) : "the blob was not removed|blob store size|" + FileUtils.sizeOfDirectory(config.getBlobStoreStorePath());
+        }
+    }
+
+}
