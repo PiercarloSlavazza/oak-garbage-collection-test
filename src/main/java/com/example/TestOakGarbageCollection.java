@@ -189,6 +189,7 @@ public class TestOakGarbageCollection {
                 Binary blobBinary = blobProperty.getBinary();
                 File downloadFile = getTemporaryFileThatWillBeDeletedOnExit("oak-garbage-collection-test-downloaded-", ".bin");
                 FileUtils.copyInputStreamToFile(blobBinary.getStream(), downloadFile);
+                blobBinary.dispose();
                 final boolean isDownloadedFileEqualToOriginalFile = Files.mismatch(Paths.get(temporaryFile.getAbsolutePath()), Paths.get(downloadFile.getAbsolutePath())) == -1L;
                 assert isDownloadedFileEqualToOriginalFile : format("downloaded file differs from original file|downloaded|%s|original|%s", downloadFile, temporaryFile);
             } finally {
