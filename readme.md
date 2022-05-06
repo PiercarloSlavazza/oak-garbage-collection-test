@@ -10,6 +10,10 @@ Little script aimed at understanding how the Oak GC is supposed to work.
 
 Please note that GC estimation is disabled.
 
+# Stackoverflow
+
+Related Stackoverflow question: https://stackoverflow.com/questions/72132489
+
 # How to run the test
 
 Parameters to set:
