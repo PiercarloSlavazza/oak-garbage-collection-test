@@ -212,7 +212,7 @@ public class TestOakGarbageCollection {
             /*
             Check the file is no more present
              */
-            log.info("*****> removing file");
+            log.info("*****> check file removed from the store");
             session = loginAsAdmin(repository);
             try {
                 try {
