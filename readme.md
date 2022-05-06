@@ -12,6 +12,12 @@ Please note that GC estimation is disabled.
 
 # How to run the test
 
+Parameters to set:
+
+* `blobStoreStorePath`
+* `fileStorePath`
+* `testFileSizeInMegabytes`
+
 ```
 mvn clean compile
 export MAVEN_OPTS="-ea" && mvn exec:java -Dexec.cleanupDaemonThreads=false -Dexec.mainClass="com.example.TestOakGarbageCollection" -Dexec.args="--blobStoreStorePath <blob store path> --fileStorePath <file store path> --testFileSizeInMegabytes <megabytes>"
