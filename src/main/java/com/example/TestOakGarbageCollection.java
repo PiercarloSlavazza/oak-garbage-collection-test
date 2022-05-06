@@ -23,8 +23,8 @@ import org.slf4j.LoggerFactory;
 
 import javax.jcr.*;
 import java.io.BufferedOutputStream;
-import java.io.FileOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -128,7 +128,9 @@ public class TestOakGarbageCollection {
         FileUtils.forceMkdir(config.getFileStorePath());
         FileUtils.forceMkdir(config.getBlobStoreStorePath());
 
-        SegmentGCOptions gcOptions = SegmentGCOptions.defaultGCOptions().setEstimationDisabled(true);
+        SegmentGCOptions gcOptions = SegmentGCOptions.defaultGCOptions().
+                setEstimationDisabled(true);
+        // gcOptions.setGCType(SegmentGCOptions.GCType.FULL);
         try (FileBlobStore fileBlobStore = new FileBlobStore(config.getBlobStoreStorePath().getAbsolutePath());
              FileStore fileStore = FileStoreBuilder.
                      fileStoreBuilder(config.getFileStorePath()).
@@ -148,6 +150,7 @@ public class TestOakGarbageCollection {
             /*
             Create a random file of the given size just under the store root node
              */
+            log.info("*****> adding file");
             Session session = loginAsAdmin(repository);
             try {
                 Node rootFolder = session.getRootNode();
@@ -177,6 +180,7 @@ public class TestOakGarbageCollection {
             /*
             Check that the file is actually there and the content is what we expect to be
              */
+            log.info("*****> checking added file");
             session = loginAsAdmin(repository);
             try {
                 Node fileNode = session.getNodeByIdentifier(fileNodeId);
@@ -194,6 +198,7 @@ public class TestOakGarbageCollection {
             /*
             Delete the file
              */
+            log.info("*****> deleting file");
             session = loginAsAdmin(repository);
             try {
                 Node fileNode = session.getNodeByIdentifier(fileNodeId);
@@ -206,12 +211,14 @@ public class TestOakGarbageCollection {
             /*
             Check the file is no more present
              */
+            log.info("*****> removing file");
             session = loginAsAdmin(repository);
             try {
                 try {
                     session.getNodeByIdentifier(fileNodeId);
                     assert false : "file is still present in the repository";
-                } catch (ItemNotFoundException ignored) {}
+                } catch (ItemNotFoundException ignored) {
+                }
             } finally {
                 session.logout();
             }
@@ -224,6 +231,7 @@ public class TestOakGarbageCollection {
             /*
             Run the GC: this is the tricky part, parameters _might_ be wrong
              */
+            log.info("*****> run GC");
             ExecutorService executorService = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
             try {
                 MarkSweepGarbageCollector garbageCollector = new MarkSweepGarbageCollector(
