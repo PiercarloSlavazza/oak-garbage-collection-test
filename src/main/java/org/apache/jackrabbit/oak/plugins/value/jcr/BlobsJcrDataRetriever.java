@@ -56,7 +56,7 @@ public class BlobsJcrDataRetriever implements BlobReferenceRetriever {
                 Value value = property.getValue();
                 if (!(value instanceof ValueImpl valueImpl)) throw new IllegalStateException();
                 Blob blob = valueImpl.getBlob();
-                if (!(blob instanceof SegmentBlob segmentBlob)) continue;
+                if (!(blob instanceof SegmentBlob segmentBlob)) throw new IllegalStateException();
                 String blobId = segmentBlob.getBlobId();
                 blobIds.add(new BlobId(blobId));
             }
