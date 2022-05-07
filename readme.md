@@ -21,8 +21,11 @@ Parameters to set:
 * `blobStoreStorePath`
 * `fileStorePath`
 * `testFileSizeInMegabytes`
+* `blobGarbageCollection` - that is either:
+    * `LEGACY` - that is, the strategy implemented in OAK
+    * `JCR_DATA_SEARCH` - that is, my attempt to find a fix to the hypothetical bug affecting the legacy GC
 
 ```
 mvn clean compile
-export MAVEN_OPTS="-ea" && mvn exec:java -Dexec.cleanupDaemonThreads=false -Dexec.mainClass="com.example.TestOakGarbageCollection" -Dexec.args="--blobStoreStorePath <blob store path> --fileStorePath <file store path> --testFileSizeInMegabytes <megabytes>"
+export MAVEN_OPTS="-ea" && mvn exec:java -Dexec.cleanupDaemonThreads=false -Dexec.mainClass="com.example.TestOakGarbageCollection" -Dexec.args="--blobStoreStorePath <blob store path> --fileStorePath <file store path> --testFileSizeInMegabytes <megabytes> --blobGarbageCollection [LEGACY|JCR_DATA_SEARCH]"
 ```

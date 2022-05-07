@@ -7,13 +7,17 @@ import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.jcr.Jcr;
+import org.apache.jackrabbit.oak.plugins.blob.BlobGarbageCollector;
 import org.apache.jackrabbit.oak.plugins.blob.MarkSweepGarbageCollector;
+import org.apache.jackrabbit.oak.plugins.blob.MarkSweepGarbageCollector2;
+import org.apache.jackrabbit.oak.plugins.value.jcr.BlobsJcrDataRetriever;
 import org.apache.jackrabbit.oak.segment.SegmentBlobReferenceRetriever;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
 import org.apache.jackrabbit.oak.segment.compaction.SegmentGCOptions;
 import org.apache.jackrabbit.oak.segment.file.FileStore;
 import org.apache.jackrabbit.oak.segment.file.FileStoreBuilder;
 import org.apache.jackrabbit.oak.spi.blob.FileBlobStore;
+import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
 import org.apache.jackrabbit.oak.spi.commit.CommitInfo;
 import org.apache.jackrabbit.oak.spi.commit.EmptyHook;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
@@ -29,10 +33,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Random;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 import static java.lang.String.format;
 
@@ -46,11 +47,18 @@ interface TestOakGarbageCollectionConfig {
 
     @Option
     int getTestFileSizeInMegabytes();
+
+    @Option
+    TestOakGarbageCollection.BlobGarbageCollection getBlobGarbageCollection();
 }
 
 public class TestOakGarbageCollection {
 
     private static final Logger log = LoggerFactory.getLogger(TestOakGarbageCollection.class);
+
+    public enum BlobGarbageCollection {
+        LEGACY, JCR_DATA_SEARCH
+    }
 
     private static void logFolderSize(File folder) {
         log.info(format("folder size in bytes|folder|%s|bytes|%d", folder, FileUtils.sizeOfDirectory(folder)));
@@ -104,8 +112,12 @@ public class TestOakGarbageCollection {
         return nodeBuilder;
     }
 
-    private static Session loginAsAdmin(Repository repository) throws RepositoryException {
-        return repository.login(new SimpleCredentials("admin", "admin".toCharArray()));
+    public static Session loginAsAdmin(Repository repository) {
+        try {
+            return repository.login(new SimpleCredentials("admin", "admin".toCharArray()));
+        } catch (RepositoryException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static void checkThatAssertionsAreEnabled() {
@@ -115,6 +127,34 @@ public class TestOakGarbageCollection {
         } catch (AssertionError ignored) {
 
         }
+    }
+
+    private static BlobGarbageCollector buildBlobGarbageCollector(
+            BlobGarbageCollection blobGarbageCollection,
+            FileStore fileStore,
+            Repository repository,
+            GarbageCollectableBlobStore fileBlobStore, Executor executorService) throws IOException {
+        final String gcTempFolder = "./gc";
+        final int batchCount = 1;
+        final int maxLastModifiedInterval = 0;
+        return switch (blobGarbageCollection) {
+            case LEGACY -> new MarkSweepGarbageCollector(
+                    new SegmentBlobReferenceRetriever(fileStore),
+                    fileBlobStore,
+                    executorService,
+                    gcTempFolder,
+                    batchCount, // do not have any idea of what this parameter is and what is supposed to be set
+                    maxLastModifiedInterval, // Setting 0 will result in a log stating "Sweeping blobs with modified time > than the configured max deleted time (1970-01-01 01:00:00.000)"
+                    null);
+            case JCR_DATA_SEARCH -> new MarkSweepGarbageCollector2(
+                    new BlobsJcrDataRetriever(() -> loginAsAdmin(repository)),
+                    fileBlobStore,
+                    executorService,
+                    gcTempFolder,
+                    batchCount,
+                    maxLastModifiedInterval,
+                    null);
+        };
     }
 
     public static void main(String... args) throws Exception {
@@ -130,7 +170,7 @@ public class TestOakGarbageCollection {
 
         SegmentGCOptions gcOptions = SegmentGCOptions.defaultGCOptions().
                 setEstimationDisabled(true);
-        // gcOptions.setGCType(SegmentGCOptions.GCType.FULL);
+        ExecutorService executorService = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
         try (FileBlobStore fileBlobStore = new FileBlobStore(config.getBlobStoreStorePath().getAbsolutePath());
              FileStore fileStore = FileStoreBuilder.
                      fileStoreBuilder(config.getFileStorePath()).
@@ -139,6 +179,13 @@ public class TestOakGarbageCollection {
                      build()) {
             NodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
             Repository repository = new Jcr(new Oak(nodeStore)).createRepository();
+
+            BlobGarbageCollector garbageCollector = buildBlobGarbageCollector(
+                    config.getBlobGarbageCollection(),
+                    fileStore,
+                    repository,
+                    fileBlobStore,
+                    executorService);
 
             logFolderSize(config.getFileStorePath());
             logFolderSize(config.getBlobStoreStorePath());
@@ -171,6 +218,10 @@ public class TestOakGarbageCollection {
             } finally {
                 session.logout();
             }
+
+            log.info("*****> run GC");
+            fileStore.flush();
+            garbageCollector.collectGarbage(false);
 
             assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) == FileUtils.sizeOf(temporaryFile) : "uploaded file seems to be missing from the blob store";
 
@@ -233,23 +284,13 @@ public class TestOakGarbageCollection {
             Run the GC: this is the tricky part, parameters _might_ be wrong
              */
             log.info("*****> run GC");
-            ExecutorService executorService = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
-            try {
-                MarkSweepGarbageCollector garbageCollector = new MarkSweepGarbageCollector(
-                        new SegmentBlobReferenceRetriever(fileStore),
-                        fileBlobStore,
-                        executorService,
-                        "./gc",
-                        1, // do not have any idea of what this parameter is and what is supposed to be set
-                        0, // Setting 0 will result in a log stating "Sweeping blobs with modified time > than the configured max deleted time (1970-01-01 01:00:00.000)"
-                        null); // no idea what it is this - but it's allowed to be null
-                garbageCollector.collectGarbage(false);
-            } finally {
-                executorService.shutdown();
-            }
+            fileStore.flush();
+            garbageCollector.collectGarbage(false);
 
             assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) < FileUtils.sizeOf(temporaryFile) : "the blob was not removed|blob store size|" + FileUtils.sizeOfDirectory(config.getBlobStoreStorePath());
+        } finally {
+            executorService.shutdown();
         }
-    }
 
+    }
 }
