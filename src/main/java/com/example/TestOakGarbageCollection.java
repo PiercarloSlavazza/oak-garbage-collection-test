@@ -192,6 +192,7 @@ public class TestOakGarbageCollection {
 
             File temporaryFile = createFileWithRandomContent(config.getTestFileSizeInMegabytes() * 1024 * 1024);
             log.info(format("generated test file|file|%s|size in bytes|%d", temporaryFile.getAbsoluteFile(), FileUtils.sizeOf(temporaryFile)));
+            long totalBlobsSize = FileUtils.sizeOf(temporaryFile);
 
             String fileNodeId;
             /*
@@ -219,23 +220,11 @@ public class TestOakGarbageCollection {
                 session.logout();
             }
 
-            /*
-            See:
-            https://issues.apache.org/jira/browse/OAK-9765?focusedCommentId=17534471&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-17534471
-            and:
-            https://issues.apache.org/jira/browse/OAK-9765?focusedCommentId=17534695&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-17534695
-             */
-            log.info("*****> run compaction");
-            for (int k = 0; k < gcOptions.getRetainedGenerations(); k++) {
-                fileStore.compactFull();
-            }
-            fileStore.cleanup();
-
             log.info("*****> run GC");
             fileStore.flush();
             garbageCollector.collectGarbage(false);
 
-            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) == FileUtils.sizeOf(temporaryFile) : "uploaded file seems to be missing from the blob store";
+            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) == totalBlobsSize : "uploaded file seems to be missing from the blob store";
 
             logFolderSize(config.getFileStorePath());
             logFolderSize(config.getBlobStoreStorePath());
@@ -290,7 +279,19 @@ public class TestOakGarbageCollection {
             /*
             We need GC in order to actually remove the files from the File System, so the Blob store should still have the previous size
              */
-            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) == FileUtils.sizeOf(temporaryFile);
+            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) == totalBlobsSize;
+
+            /*
+            See:
+            https://issues.apache.org/jira/browse/OAK-9765?focusedCommentId=17534471&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-17534471
+            and:
+            https://issues.apache.org/jira/browse/OAK-9765?focusedCommentId=17534695&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-17534695
+             */
+            log.info("*****> run compaction");
+            for (int k = 0; k < gcOptions.getRetainedGenerations(); k++) {
+                fileStore.compactFull();
+            }
+            fileStore.cleanup();
 
             /*
             Run the GC: this is the tricky part, parameters _might_ be wrong
@@ -299,7 +300,7 @@ public class TestOakGarbageCollection {
             fileStore.flush();
             garbageCollector.collectGarbage(false);
 
-            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) < FileUtils.sizeOf(temporaryFile) : "the blob was not removed|blob store size|" + FileUtils.sizeOfDirectory(config.getBlobStoreStorePath());
+            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) < totalBlobsSize : "the blob was not removed|blob store size|" + FileUtils.sizeOfDirectory(config.getBlobStoreStorePath());
         } finally {
             executorService.shutdown();
         }
