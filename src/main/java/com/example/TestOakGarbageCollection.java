@@ -222,9 +222,14 @@ public class TestOakGarbageCollection {
             /*
             See:
             https://issues.apache.org/jira/browse/OAK-9765?focusedCommentId=17534471&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-17534471
+            and:
+            https://issues.apache.org/jira/browse/OAK-9765?focusedCommentId=17534695&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-17534695
              */
             log.info("*****> run compaction");
-            fileStore.compactFull();
+            for (int k = 0; k < gcOptions.getRetainedGenerations(); k++) {
+                fileStore.compactFull();
+            }
+            fileStore.cleanup();
 
             log.info("*****> run GC");
             fileStore.flush();
