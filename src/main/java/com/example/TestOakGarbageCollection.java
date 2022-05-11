@@ -157,6 +157,12 @@ public class TestOakGarbageCollection {
         };
     }
 
+    private static void compactFileStore(FileStore fileStore, SegmentGCOptions gcOptions) {
+        for (int k = 0; k < gcOptions.getRetainedGenerations(); k++) {
+            fileStore.compactFull();
+        }
+    }
+
     public static void main(String... args) throws Exception {
         checkThatAssertionsAreEnabled();
 
@@ -219,6 +225,9 @@ public class TestOakGarbageCollection {
             } finally {
                 session.logout();
             }
+
+            log.info("*****> run compaction");
+            compactFileStore(fileStore, gcOptions);
 
             log.info("*****> run GC");
             fileStore.flush();
@@ -288,10 +297,7 @@ public class TestOakGarbageCollection {
             https://issues.apache.org/jira/browse/OAK-9765?focusedCommentId=17534695&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-17534695
              */
             log.info("*****> run compaction");
-            for (int k = 0; k < gcOptions.getRetainedGenerations(); k++) {
-                fileStore.compactFull();
-            }
-            fileStore.cleanup();
+            compactFileStore(fileStore, gcOptions);
 
             /*
             Run the GC: this is the tricky part, parameters _might_ be wrong
