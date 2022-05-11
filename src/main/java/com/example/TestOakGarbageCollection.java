@@ -219,6 +219,13 @@ public class TestOakGarbageCollection {
                 session.logout();
             }
 
+            /*
+            See:
+            https://issues.apache.org/jira/browse/OAK-9765?focusedCommentId=17534471&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-17534471
+             */
+            log.info("*****> run compaction");
+            fileStore.compactFull();
+
             log.info("*****> run GC");
             fileStore.flush();
             garbageCollector.collectGarbage(false);
