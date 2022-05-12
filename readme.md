@@ -10,6 +10,16 @@ Little script aimed at understanding how the Oak GC is supposed to work.
 
 Please note that GC estimation is disabled.
 
+# Main finding
+
+As reported by the Oak developers commetings [the issue I opened](https://issues.apache.org/jira/browse/OAK-9765) regarding this matter, in order to run GC in an effective way, it is required to first run "compaction", this way:
+
+```Java
+        for (int k = 0; k < gcOptions.getRetainedGenerations(); k++) {
+            fileStore.compactFull();
+        }
+```
+
 # Stackoverflow
 
 Related Stackoverflow question: https://stackoverflow.com/questions/72132489
