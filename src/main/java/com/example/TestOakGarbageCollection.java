@@ -3,14 +3,17 @@ package com.example;
 import com.lexicalscope.jewel.cli.CliFactory;
 import com.lexicalscope.jewel.cli.Option;
 import org.apache.commons.io.FileUtils;
+import org.apache.jackrabbit.core.data.DataStoreException;
 import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
+import org.apache.jackrabbit.oak.blob.cloud.s3.S3DataStore;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.jcr.Jcr;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGarbageCollector;
 import org.apache.jackrabbit.oak.plugins.blob.MarkSweepGarbageCollector;
 import org.apache.jackrabbit.oak.plugins.blob.MarkSweepGarbageCollector2;
+import org.apache.jackrabbit.oak.plugins.blob.datastore.DataStoreBlobStore;
 import org.apache.jackrabbit.oak.plugins.value.jcr.BlobsJcrDataRetriever;
 import org.apache.jackrabbit.oak.segment.SegmentBlobReferenceRetriever;
 import org.apache.jackrabbit.oak.segment.SegmentNodeStoreBuilders;
@@ -27,12 +30,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.jcr.*;
-import java.io.BufferedOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
+import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.Properties;
 import java.util.Random;
 import java.util.concurrent.*;
 
@@ -51,6 +52,14 @@ interface TestOakGarbageCollectionConfig {
 
     @Option
     TestOakGarbageCollection.BlobGarbageCollection getBlobGarbageCollection();
+
+    @Option
+    File getOakS3BlobStoreFolderPath();
+    Boolean isOakS3BlobStoreFolderPath();
+
+    @Option
+    File getOakS3BlobStoreConfigFilePath();
+    Boolean isOakS3BlobStoreConfigFilePath();
 }
 
 public class TestOakGarbageCollection {
@@ -146,7 +155,7 @@ public class TestOakGarbageCollection {
                     gcTempFolder,
                     batchCount, // do not have any idea of what this parameter is and what is supposed to be set
                     maxLastModifiedInterval, // Setting 0 will result in a log stating "Sweeping blobs with modified time > than the configured max deleted time (1970-01-01 01:00:00.000)"
-                    null);
+                    "");
             case JCR_DATA_SEARCH -> new MarkSweepGarbageCollector2(
                     new BlobsJcrDataRetriever(() -> loginAsAdmin(repository)),
                     fileBlobStore,
@@ -189,6 +198,71 @@ public class TestOakGarbageCollection {
         return fileNodeId;
     }
 
+    private static FileBlobStore buildFileBlobStore(TestOakGarbageCollectionConfig config) {
+        return new FileBlobStore(config.getBlobStoreStorePath().getAbsolutePath());
+    }
+
+    private static GarbageCollectableBlobStore buildS3BlobStore(File oakS3BlobStoreConfigFilePath, File oakS3BlobStoreFolderPath) {
+        if (oakS3BlobStoreConfigFilePath == null || oakS3BlobStoreFolderPath == null)
+            throw new IllegalArgumentException("oakS3BlobStoreConfigFilePath and oakS3BlobStoreFolderPath must be configured");
+        if (!oakS3BlobStoreConfigFilePath.exists())
+            throw new IllegalArgumentException("oakS3BlobStoreConfigFilePath not found|" + oakS3BlobStoreConfigFilePath);
+        if (!oakS3BlobStoreConfigFilePath.isFile())
+            throw new IllegalArgumentException("oakS3BlobStoreConfigFilePath not a file|" + oakS3BlobStoreConfigFilePath);
+        if (!oakS3BlobStoreFolderPath.exists()) {
+            try {
+                FileUtils.forceMkdir(oakS3BlobStoreFolderPath);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        if (!oakS3BlobStoreFolderPath.isDirectory())
+            throw new IllegalArgumentException("oakS3BlobStoreFolderPath not a folder|" + oakS3BlobStoreFolderPath);
+
+        log.info(format("init blob store|type|S3|config|%s|folder|%s", oakS3BlobStoreConfigFilePath, oakS3BlobStoreFolderPath));
+
+        Properties s3CfgFileProperties = new Properties();
+        try (InputStream is = FileUtils.openInputStream(oakS3BlobStoreConfigFilePath)) {
+            s3CfgFileProperties.load(is);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        S3DataStore s3DataStore = new S3DataStore();
+        s3DataStore.setProperties(s3CfgFileProperties);
+
+            /*
+            We set MinRecordLength to zero bytes because
+            we want that every file is uploaded to the blobstore regardless its size.
+            */
+        s3DataStore.setMinRecordLength(0);
+
+            /*
+            We disable the staging phase because, if enabled, it occurs the following issue:
+            - when uploading a blob
+            - the blob is properly uploaded to the blob store (e.g. S3)
+            - BUT on subsequent execution it always occurs an error
+            */
+        s3DataStore.setStagingSplitPercentage(0);
+
+        try {
+            s3DataStore.init(oakS3BlobStoreFolderPath.getAbsolutePath());
+        } catch (DataStoreException e) {
+            throw new RuntimeException(e);
+        }
+
+        return new DataStoreBlobStore(s3DataStore);
+    }
+
+    private static GarbageCollectableBlobStore buildBlobStore(TestOakGarbageCollectionConfig config) {
+        if (config.isOakS3BlobStoreFolderPath() && config.isOakS3BlobStoreConfigFilePath()) {
+            log.info("Building S3 blob store");
+            return buildS3BlobStore(config.getOakS3BlobStoreConfigFilePath(), config.getOakS3BlobStoreFolderPath());
+        }
+
+        log.info("Building file blob store");
+        return buildFileBlobStore(config);
+    }
+
     public static void main(String... args) throws Exception {
         checkThatAssertionsAreEnabled();
 
@@ -203,10 +277,10 @@ public class TestOakGarbageCollection {
         SegmentGCOptions gcOptions = SegmentGCOptions.defaultGCOptions().
                 setEstimationDisabled(true);
         ExecutorService executorService = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
-        try (FileBlobStore fileBlobStore = new FileBlobStore(config.getBlobStoreStorePath().getAbsolutePath());
+        try (GarbageCollectableBlobStore blobStore = buildBlobStore(config);
              FileStore fileStore = FileStoreBuilder.
                      fileStoreBuilder(config.getFileStorePath()).
-                     withBlobStore(fileBlobStore).
+                     withBlobStore(blobStore).
                      withGCOptions(gcOptions).
                      build()) {
             NodeStore nodeStore = SegmentNodeStoreBuilders.builder(fileStore).build();
@@ -216,7 +290,7 @@ public class TestOakGarbageCollection {
                     config.getBlobGarbageCollection(),
                     fileStore,
                     repository,
-                    fileBlobStore,
+                    blobStore,
                     executorService);
 
             logFolderSize(config.getFileStorePath());
@@ -239,8 +313,6 @@ public class TestOakGarbageCollection {
             log.info("*****> run GC");
             fileStore.flush();
             garbageCollector.collectGarbage(false);
-
-            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) == totalBlobsSize : "uploaded file seems to be missing from the blob store";
 
             logFolderSize(config.getFileStorePath());
             logFolderSize(config.getBlobStoreStorePath());
@@ -293,11 +365,6 @@ public class TestOakGarbageCollection {
             }
 
             /*
-            We need GC in order to actually remove the files from the File System, so the Blob store should still have the previous size
-             */
-            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) == totalBlobsSize;
-
-            /*
             We must a "little" random content file because otherwise the repository will be void, and, as such, an error
             "Marked references not available" will be raised - see:
             https://issues.apache.org/jira/browse/OAK-9765?focusedCommentId=17534722&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-17534722
@@ -321,7 +388,6 @@ public class TestOakGarbageCollection {
             fileStore.flush();
             garbageCollector.collectGarbage(false);
 
-            assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) < totalBlobsSize : "the blob was not removed|blob store size|" + FileUtils.sizeOfDirectory(config.getBlobStoreStorePath());
         } finally {
             executorService.shutdown();
         }

@@ -34,6 +34,9 @@ Parameters to set:
 * `blobGarbageCollection` - that is either:
     * `LEGACY` - that is, the strategy implemented in OAK
     * `JCR_DATA_SEARCH` - that is, my attempt to find a fix to the hypothetical bug affecting the legacy GC
+* when running the S3 tests (that needs additional parameters), you must also set the following env variables:
+    * `AWS_ACCESS_KEY_ID`
+    * `AWS_SECRET_ACCESS_KEY`
 
 ```
 mvn clean compile
