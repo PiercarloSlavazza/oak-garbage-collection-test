@@ -5,6 +5,7 @@ import com.lexicalscope.jewel.cli.Option;
 import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.oak.Oak;
 import org.apache.jackrabbit.oak.api.Blob;
+import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.jcr.Jcr;
 import org.apache.jackrabbit.oak.plugins.blob.BlobGarbageCollector;
@@ -163,6 +164,31 @@ public class TestOakGarbageCollection {
         }
     }
 
+    private static String addFile(NodeStore nodeStore, Repository repository, File temporaryFile) throws RepositoryException, IOException, CommitFailedException {
+        String fileNodeId;
+        Session session = loginAsAdmin(repository);
+        try {
+            Node rootFolder = session.getRootNode();
+            Node fileNode = rootFolder.addNode(temporaryFile.getName(), "nt:file");
+            fileNode.addMixin("mix:referenceable");
+            Node fileContentNode = fileNode.addNode("jcr:content", "nt:resource");
+            fileContentNode.setProperty("jcr:data", "");
+            session.save();
+
+            Blob blob = nodeStore.createBlob(FileUtils.openInputStream(temporaryFile));
+            NodeBuilder rootBuilder = nodeStore.getRoot().builder();
+            NodeBuilder fileContentNodeBuilder = getNodeBuilder(fileContentNode, rootBuilder);
+            fileContentNodeBuilder.setProperty("jcr:data", blob);
+            nodeStore.merge(rootBuilder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+            session.save();
+
+            fileNodeId = fileNode.getIdentifier();
+        } finally {
+            session.logout();
+        }
+        return fileNodeId;
+    }
+
     public static void main(String... args) throws Exception {
         checkThatAssertionsAreEnabled();
 
@@ -205,26 +231,7 @@ public class TestOakGarbageCollection {
             Create a random file of the given size just under the store root node
              */
             log.info("*****> adding file");
-            Session session = loginAsAdmin(repository);
-            try {
-                Node rootFolder = session.getRootNode();
-                Node fileNode = rootFolder.addNode(temporaryFile.getName(), "nt:file");
-                fileNode.addMixin("mix:referenceable");
-                Node fileContentNode = fileNode.addNode("jcr:content", "nt:resource");
-                fileContentNode.setProperty("jcr:data", "");
-                session.save();
-
-                Blob blob = nodeStore.createBlob(FileUtils.openInputStream(temporaryFile));
-                NodeBuilder rootBuilder = nodeStore.getRoot().builder();
-                NodeBuilder fileContentNodeBuilder = getNodeBuilder(fileContentNode, rootBuilder);
-                fileContentNodeBuilder.setProperty("jcr:data", blob);
-                nodeStore.merge(rootBuilder, EmptyHook.INSTANCE, CommitInfo.EMPTY);
-                session.save();
-
-                fileNodeId = fileNode.getIdentifier();
-            } finally {
-                session.logout();
-            }
+            fileNodeId = addFile(nodeStore, repository, temporaryFile);
 
             log.info("*****> run compaction");
             compactFileStore(fileStore, gcOptions);
@@ -242,7 +249,7 @@ public class TestOakGarbageCollection {
             Check that the file is actually there and the content is what we expect to be
              */
             log.info("*****> checking added file");
-            session = loginAsAdmin(repository);
+            Session session = loginAsAdmin(repository);
             try {
                 Node fileNode = session.getNodeByIdentifier(fileNodeId);
                 Node fileContentNode = fileNode.getNode("jcr:content");
@@ -289,6 +296,14 @@ public class TestOakGarbageCollection {
             We need GC in order to actually remove the files from the File System, so the Blob store should still have the previous size
              */
             assert FileUtils.sizeOfDirectory(config.getBlobStoreStorePath()) == totalBlobsSize;
+
+            /*
+            We must a "little" random content file because otherwise the repository will be void, and, as such, an error
+            "Marked references not available" will be raised - see:
+            https://issues.apache.org/jira/browse/OAK-9765?focusedCommentId=17534722&page=com.atlassian.jira.plugin.system.issuetabpanels%3Acomment-tabpanel#comment-17534722
+            and following for an explanation
+             */
+            addFile(nodeStore, repository, createFileWithRandomContent(1024 * 1024));
 
             /*
             See:
